@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/last-tftp-core",
+    "crates/last-tftp-app",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.75"
+license = "MIT OR Apache-2.0"
+repository = "local"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+indicatif = "0.17"
+anyhow = "1"
+thiserror = "1"
+bytes = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

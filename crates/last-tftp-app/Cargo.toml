@@ -1,0 +1,39 @@
+[package]
+name = "last-tftp"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "last-tftp"
+path = "src/main.rs"
+
+[dependencies]
+last-tftp-core = { path = "../last-tftp-core" }
+tokio = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+indicatif = { workspace = true }
+anyhow = { workspace = true }
+bytes = { workspace = true }
+if-addrs = "0.10"
+serde = { workspace = true }
+serde_json = { workspace = true }
+egui = "0.32"
+glow = "0.16"
+rfd = "0.17"
+
+# eframe features 按平台条件化
+# Linux: wayland + x11（Xwayland 兼容）
+# macOS / Windows: 不需要 wayland（winit 自动用 cocoa / win32）
+[target.'cfg(target_os = "linux")'.dependencies]
+eframe = { version = "0.32", default-features = false, features = ["default_fonts", "accesskit", "glow", "wayland", "x11", "__screenshot"] }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+eframe = { version = "0.32", default-features = false, features = ["default_fonts", "accesskit", "glow", "__screenshot"] }
+
+[dev-dependencies]
+egui = "0.32"
