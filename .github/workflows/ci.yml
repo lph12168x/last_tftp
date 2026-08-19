@@ -39,12 +39,31 @@ jobs:
         with:
           workspaces: ./crates/last-tftp-core -> target
           cache-on-failure: true
+          key: v6
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        shell: bash
+        run: |
+          # 强制重建 last-tftp-app（避免 rust-cache 跳过 build.rs）
+          cargo clean -p last-tftp-app 2>/dev/null || true
+          cargo build --release --target ${{ matrix.target }}
 
       - name: Run tests
         run: cargo test --release --target ${{ matrix.target }} --no-fail-fast
+
+      - name: Strip dep file
+        shell: bash
+        run: |
+          find "target/${{ matrix.target }}/release" -maxdepth 1 -name '*.d' -delete 2>/dev/null || true
+          find "target/${{ matrix.target }}/release" -maxdepth 1 -name '*.pdb' -delete 2>/dev/null || true
+
+      - name: Inject icon on Windows
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/electron/rcedit/releases/download/v2.0.0/rcedit-x64.exe" -OutFile rcedit.exe
+          .\rcedit.exe "target\x86_64-pc-windows-msvc\release\last-tftp.exe" --set-icon "resources\icons\icon.ico"
+          Write-Host "Icon injected successfully"
 
       - name: Upload binary
         uses: actions/upload-artifact@v4

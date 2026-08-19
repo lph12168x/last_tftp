@@ -28,12 +28,12 @@ impl Default for ClientConfig {
     }
 }
 
-/// 单次传输的统计。
 #[derive(Debug, Clone, Default)]
+/// 单次传输的统计。
 pub struct TransferStats {
     pub bytes: u64,
     pub blocks: u64,
-    /// 端到端总耗时（毫秒）。
+    pub total_bytes: Option<u64>,
     pub duration_ms: u64,
 }
 
@@ -65,6 +65,7 @@ mod tests {
         let s = TransferStats {
             bytes: 1_000_000,
             blocks: 1_000_000 / 512,
+            total_bytes: None,
             duration_ms: 8_000,
         };
         // 1MB in 8s -> 1 Mbps

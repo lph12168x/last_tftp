@@ -107,6 +107,7 @@ pub struct App {
     pub server_stop: Option<Arc<std::sync::atomic::AtomicBool>>,
     pub server_status_rx: Option<Receiver<String>>,
     pub server_transfer_rx: Option<Receiver<ServerTransferEvent>>,
+    pub server_progress_rx: Option<Receiver<u64>>,
     pub remote_host: String,
     pub remote_port: u16,
     pub blksize: u16,
@@ -144,14 +145,14 @@ impl App {
         Self {
             server: ServerFields {
                 root: PathBuf::from("."),
-                port: 6969,
+                port: 69,
                 allow_write: false,
                 running: false,
             },
             server_root_str: String::from("."),
             server_stop: None,
             remote_host: String::from("127.0.0.1"),
-            remote_port: 6969,
+            remote_port: 69,
             blksize: 1468,
             window: 1,
             ipv6: false,
@@ -163,6 +164,7 @@ impl App {
 
             server_status_rx: None,
             server_transfer_rx: None,
+            server_progress_rx: None,
             gl: None,
             local_ips: collect_local_ips(),
             msg_tx: tx,
@@ -230,10 +232,23 @@ impl App {
 
     fn push_log(&mut self, line: impl Into<String>) {
         let line = line.into();
-        self.log.push(line);
+        self.log.push(line.clone());
         if self.log.len() > 500 {
             self.log.remove(0);
         }
+        if let Some(path) = Self::log_file_path() {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+                let _ = writeln!(f, "{}", &line);
+            }
+        }
+    }
+    fn log_file_path() -> Option<std::path::PathBuf> {
+        let exe = std::env::current_exe().ok()?;
+        Some(exe.parent()?.join("last-tftp.log"))
     }
 
     fn start_server(&mut self) {
@@ -249,7 +264,9 @@ impl App {
         let stop_for_self = Arc::clone(&stop);
         let (st_tx, st_rx) = std::sync::mpsc::channel::<String>();
         let (tr_tx, tr_rx) = std::sync::mpsc::channel::<ServerTransferEvent>();
+        let (pr_tx, pr_rx) = std::sync::mpsc::channel::<u64>();
         self.server_transfer_rx = Some(tr_rx);
+        self.server_progress_rx = Some(pr_rx);
 
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_multi_thread()
@@ -282,12 +299,12 @@ impl App {
                     }
                 }
                 let cfg = last_tftp_core::server::ServerConfig::new(root, allow_write);
-                if let Err(e) = run_server_with_observer(addr, cfg, tr_tx.clone(), std::sync::Arc::clone(&stop)).await {
+                if let Err(e) = run_server_with_observer(addr, cfg, tr_tx.clone(), pr_tx, std::sync::Arc::clone(&stop)).await {
                     let _ = st_tx.send(format!("server stopped: {e}"));
                 }
             });
         });
-        try_add_firewall_rule(port);
+        std::thread::spawn(move || try_add_firewall_rule(port));
         self.server.running = true;
         self.server_stop = Some(stop_for_self);
         self.server_status_rx = Some(st_rx);
@@ -384,35 +401,51 @@ impl App {
         for line in server_lines {
             self.push_log(line);
         }
-        // 服务端传输事件：start 时 push 新 transfer 记录，done 时更新。
+        // 服务端传输事件：先 drain 出来（避免 push_log 持 &self 时的借用冲突）。
+        let mut server_events: Vec<ServerTransferEvent> = Vec::new();
         if let Some(rx) = self.server_transfer_rx.as_ref() {
-            while let Ok(ev) = rx.try_recv() {
-                if !ev.done {
-                    let target = format!("server://{}/{}", ev.peer, ev.filename);
-                    self.transfers.push(TransferState {
-                        id: self.next_id,
-                        direction: ev.direction,
-                        target,
-                        bytes: 0,
-                        blocks: 0,
-                        total: None,
-                        started: Instant::now(),
-                        done: false,
-                        error: None,
-                        bps_ema: 0.0,
-                    });
-                    self.next_id += 1;
-                } else if let Some(t) = self.transfers.iter_mut().rev().find(|t| {
-                    t.target.starts_with("server://")
-                        && t.target.contains(&ev.peer)
-                        && t.target.ends_with(&ev.filename)
-                        && !t.done
+            while let Ok(ev) = rx.try_recv() { server_events.push(ev); }
+        }
+        let mut server_log_lines: Vec<String> = Vec::new();
+        for ev in server_events {
+            let dir_str = |d: &Direction| match d { Direction::Get => "GET", Direction::Put => "PUT" };
+            if !ev.done {
+                let target = format!("server://{}/{}", ev.peer, ev.filename);
+                server_log_lines.push(format!("[server] {} from {} file={}", dir_str(&ev.direction), ev.peer, ev.filename));
+                self.transfers.push(TransferState {
+                    id: self.next_id, direction: ev.direction, target,
+                    bytes: 0, blocks: 0, total: None, started: Instant::now(),
+                    done: false, error: None, bps_ema: 0.0,
+                });
+                self.next_id += 1;
+            } else if let Some(t) = self.transfers.iter_mut().rev().find(|t| {
+                t.target.starts_with("server://") && t.target.contains(&ev.peer)
+                    && t.target.ends_with(&ev.filename) && !t.done
+            }) {
+                t.done = true;
+                t.error = ev.error.clone();
+                if ev.bytes > t.bytes { t.bytes = ev.bytes; }
+                if ev.total.is_some() { t.total = ev.total; }
+                let log_line = if let Some(ref err) = ev.error {
+                    format!("[server] {} {} FAILED: {} ({} bytes)", dir_str(&t.direction), t.target, err, t.bytes)
+                } else {
+                    format!("[server] {} {} DONE ({} bytes)", dir_str(&t.direction), t.target, t.bytes)
+                };
+                server_log_lines.push(log_line);
+            }
+        }
+        for line in server_log_lines { self.push_log(line); }
+
+        // 服务端传输进度：每来一个 progress 事件更新匹配 transfer 的 bytes + 计算 KB/s。
+        if let Some(rx) = self.server_progress_rx.as_ref() {
+            while let Ok(bytes) = rx.try_recv() {
+                if let Some(t) = self.transfers.iter_mut().rev().find(|t| {
+                    t.target.starts_with("server://") && !t.done
                 }) {
-                    t.done = true;
-                    t.error = ev.error.clone();
-                    if ev.bytes > t.bytes {
-                        t.bytes = ev.bytes;
-                    }
+                    let dt = t.started.elapsed().as_secs_f64().max(0.001);
+                    let inst = bytes as f64 / dt;  // bytes per second
+                    t.bps_ema = if t.bps_ema == 0.0 { inst } else { t.bps_ema * 0.7 + inst * 0.3 };
+                    t.bytes = bytes;
                 }
             }
         }
@@ -421,7 +454,7 @@ impl App {
                 GuiMsg::Progress { id, bytes, blocks, total } => {
                     if let Some(t) = self.transfers.iter_mut().find(|t| t.id == id) {
                         let dt = t.started.elapsed().as_secs_f64().max(0.001);
-                        let inst = (bytes as f64 * 8.0) / dt;
+                        let inst = bytes as f64 / dt;
                         t.bps_ema = if t.bps_ema == 0.0 { inst } else { t.bps_ema * 0.7 + inst * 0.3 };
                         t.bytes = bytes;
                         t.blocks = blocks;
@@ -828,7 +861,9 @@ impl App {
         };
         // 从 target 抽文件名（target 形如 "host:port/file"）
         let filename = t.target.rsplit('/').next().unwrap_or(&t.target).to_string();
-        // 进度
+        // 进度：始终用 bytes/total 计算百分比（缓慢增长）。
+        // 没有 total 时（服务端 transfer）：用已传 bytes 的 log 估算，
+        // 让进度条缓慢前行但不依赖传输速度。
         let (progress, pct) = if let Some(total) = t.total {
             if total > 0 {
                 let p = (t.bytes as f32 / total as f32).clamp(0.0, 1.0);
@@ -836,6 +871,14 @@ impl App {
             } else {
                 (0.0, "—".into())
             }
+        } else if t.bytes > 0 && !t.done {
+            // 没有 total 的场景（server side）：按已传 bytes 做 log 估算，
+            // 让进度条单调递增且缓慢前行，不随速度跳动。
+            let log_est = (t.bytes as f64 + 1.0).ln() as f32;
+            let p = (log_est / 22.0).clamp(0.02, 0.98);
+            (p, format!("{} / ? ({:.0} KB/s)", human_bytes(t.bytes), t.bps_ema / 1000.0))
+        } else if t.bytes > 0 && t.done {
+            (1.0, format!("{} (DONE)", human_bytes(t.bytes)))
         } else {
             (0.0, "…".into())
         };
@@ -1206,6 +1249,7 @@ pub struct ServerTransferEvent {
     pub peer: String,
     pub filename: String,
     pub bytes: u64,
+    pub total: Option<u64>,
     pub done: bool,
     pub error: Option<String>,
 }
@@ -1216,6 +1260,7 @@ async fn run_server_with_observer(
     bind_addr: std::net::SocketAddr,
     cfg: last_tftp_core::server::ServerConfig,
     tr_tx: std::sync::mpsc::Sender<ServerTransferEvent>,
+    pr_tx: std::sync::mpsc::Sender<u64>,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> std::io::Result<()> {
     use last_tftp_core::packet::Packet;
@@ -1245,27 +1290,25 @@ async fn run_server_with_observer(
             peer: peer.to_string(),
             filename: filename.clone(),
             bytes: 0,
+            total: None,
             done: false,
             error: None,
         });
         let cfg2 = cfg.clone();
         let tr_tx2 = tr_tx.clone();
+        let pr_tx2 = pr_tx.clone();
         let peer_s = peer.to_string();
         let filename_s = filename.clone();
         let direction_s = direction.clone();
         tokio::spawn(async move {
-            let result = handle_one(peer, pkt, cfg2).await;
-            let err = result.err().map(|e| e.to_string());
-            // 注：handle_one 内部不返回 bytes 统计，server transfer 的 size 显示为占位 0；
-            // 完整 bytes 数需要修改 core API 才能暴露。后续迭代可加。
-            let bytes = 0;
+            let result = handle_one(peer, pkt, cfg2, Some(pr_tx2)).await;
+            let (bytes, total, err) = match result {
+                Ok(stats) => (stats.bytes, stats.total_bytes, None),
+                Err(e) => (0, None, Some(e.to_string())),
+            };
             let _ = tr_tx2.send(ServerTransferEvent {
-                direction: direction_s,
-                peer: peer_s,
-                filename: filename_s,
-                bytes,
-                done: true,
-                error: err,
+                direction: direction_s, peer: peer_s, filename: filename_s,
+                bytes, total, done: true, error: err,
             });
         });
     }
@@ -1275,30 +1318,23 @@ async fn run_server_with_observer(
 /// tftpd64 走的是安装时一次性注册；我们做运行时添加（需要管理员权限）。
 #[cfg(target_os = "windows")]
 fn try_add_firewall_rule(port: u16) {
+    use std::os::windows::process::CommandExt;
     use std::process::Command;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(_) => return,
     };
     let rule_name = format!("last-tftp UDP {port}");
-    // 先删旧规则（idempotent）
     let _ = Command::new("netsh")
-        .args([
-            "advfirewall", "firewall", "delete", "rule",
-            &format!("name={rule_name}"),
-        ])
+        .args(["advfirewall", "firewall", "delete", "rule", &format!("name={rule_name}")])
+        .creation_flags(CREATE_NO_WINDOW)
         .output();
-    // 加新规则：允许入站 UDP 到本程序
     let res = Command::new("netsh")
-        .args([
-            "advfirewall", "firewall", "add", "rule",
-            &format!("name={rule_name}"),
-            "dir=in",
-            "action=allow",
-            "protocol=UDP",
-            &format!("localport={port}"),
-            &format!("program={}", exe.display()),
-        ])
+        .args(["advfirewall", "firewall", "add", "rule", &format!("name={rule_name}"),
+               "dir=in", "action=allow", "protocol=UDP",
+               &format!("localport={port}"), &format!("program={}", exe.display())])
+        .creation_flags(CREATE_NO_WINDOW)
         .output();
     if let Ok(out) = res {
         if !out.status.success() {
