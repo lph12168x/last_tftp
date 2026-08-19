@@ -113,6 +113,8 @@ pub struct Negotiation {
     pub blksize: u16,
     pub timeout: u16,
     pub windowsize: u16,
+    /// RRQ 时 server 回 OACK 带的文件大小，client GET 据此算进度百分比。
+    pub tsize: Option<u64>,
 }
 
 impl Negotiation {
@@ -121,6 +123,7 @@ impl Negotiation {
             blksize: crate::DEFAULT_BLOCK_SIZE,
             timeout: crate::DEFAULT_TIMEOUT_SECS,
             windowsize: crate::DEFAULT_WINDOW_SIZE,
+            tsize: None,
         }
     }
 
@@ -135,6 +138,9 @@ impl Negotiation {
         }
         if let Some(v) = oack.windowsize() {
             out.windowsize = v;
+        }
+        if let Some(v) = oack.tsize() {
+            out.tsize = Some(v);
         }
         out
     }
@@ -161,6 +167,7 @@ pub fn validate_request(req: &Options) -> Result<Negotiation, crate::TftpError> 
         }
         n.windowsize = v.min(crate::MAX_WINDOW_SIZE);
     }
+    n.tsize = req.tsize();
     Ok(n)
 }
 
@@ -195,6 +202,7 @@ mod tests {
         assert_eq!(n.blksize, 512);
         assert_eq!(n.timeout, 5);
         assert_eq!(n.windowsize, 1);
+        assert_eq!(n.tsize, None);
     }
 
     #[test]
@@ -206,6 +214,16 @@ mod tests {
         assert_eq!(applied.blksize, 8192);
         assert_eq!(applied.timeout, 5);
         assert_eq!(applied.windowsize, 1);
+        assert_eq!(applied.tsize, None);
+    }
+
+    #[test]
+    fn apply_oack_preserves_tsize_from_oack() {
+        let n = Negotiation::defaults();
+        let mut oack = Options::new();
+        oack.set_tsize(102400);
+        let applied = n.apply_oack(&oack);
+        assert_eq!(applied.tsize, Some(102400));
     }
 
     #[test]

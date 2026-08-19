@@ -127,10 +127,12 @@ impl Client {
         let mut stats = TransferStats::default();
         let mut expected_block: u64 = self.cfg.resume_from_block + 1;
         let mut last_acked_block: u16 = self.cfg.resume_from_block as u16;
-        // 主循环：单包超时累计 retries 次后放弃，每次超时重发上一个 ACK
+        // 单包超时累计 retries 次后放弃，每次超时重发上一个 ACK
         // 触发 server 端重传当前 block（RFC 1350 ACK 语义）。
         let max_retries = self.cfg.retries.max(1);
         let mut retries_left: u32 = max_retries;
+        // ← 关键：从 OACK 拿到文件大小，传给 GUI 的 Progress.total_bytes
+        let total_bytes = neg.tsize;
         loop {
             // recv_packet 内部已有 tokio::time::timeout，这里只需处理 Result。
             let (pkt, from) = match recv_packet(&sock, timeout).await {
@@ -176,6 +178,7 @@ impl Client {
                     out.write_all(&data).await?;
                     stats.bytes += data.len() as u64;
                     stats.blocks += 1;
+                    stats.total_bytes = total_bytes;
                     expected_block += 1;
                     last_acked_block = block;
                     if data.len() < neg.blksize as usize {
@@ -207,6 +210,7 @@ impl Client {
             blksize: self.cfg.blksize,
             timeout: self.cfg.timeout_secs,
             windowsize: self.cfg.windowsize,
+            tsize: None,
         };
 
         let sock_ref = sock;
@@ -304,6 +308,7 @@ impl Client {
 
             stats.bytes += n as u64;
             stats.blocks += 1;
+            stats.total_bytes = Some(total_bytes);
 
             if n < neg.blksize as usize {
                 return Ok(stats);
@@ -327,6 +332,7 @@ impl Client {
             blksize: self.cfg.blksize,
             timeout: self.cfg.timeout_secs,
             windowsize: self.cfg.windowsize,
+            tsize: None,
         };
 
         let sock_ref = sock;

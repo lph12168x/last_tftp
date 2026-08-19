@@ -39,7 +39,7 @@ serde_json = { workspace = true }
 egui = "0.32"
 glow = "0.16"
 rfd = "0.17"
-
+image = "0.25"
 # eframe features 按平台条件化
 # Linux: wayland + x11（Xwayland 兼容）
 # macOS / Windows: 不需要 wayland（winit 自动用 cocoa / win32）

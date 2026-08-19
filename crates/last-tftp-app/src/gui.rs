@@ -71,11 +71,20 @@ pub fn run() -> anyhow::Result<()> {
 pub fn run_with_options(
     auto_get: Option<(String, u16, String, PathBuf)>,
 ) -> anyhow::Result<()> {
+    #[cfg(target_os = "windows")]
+    let icon_data = load_icon_from_resources();
+    #[cfg(not(target_os = "windows"))]
+    let icon_data: Option<egui::IconData> = None;
+
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("last-tftp")
+        .with_inner_size([960.0, 640.0])
+        .with_min_inner_size([760.0, 480.0]);
+    if let Some(icon) = icon_data {
+        viewport = viewport.with_icon(icon);
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("last-tftp")
-            .with_inner_size([960.0, 640.0])
-            .with_min_inner_size([760.0, 480.0]),
+        viewport,
         ..Default::default()
     };
     eframe::run_native(
@@ -93,6 +102,17 @@ pub fn run_with_options(
     Ok(())
 }
 
+/// 从嵌入的 PNG 数据加载窗口图标。
+#[cfg(target_os = "windows")]
+fn load_icon_from_resources() -> Option<egui::IconData> {
+    // 嵌入编译时的 PNG 图标数据
+    let png_data: &[u8] = include_bytes!("../../../resources/icons/icon_48x48.png");
+    let img = image::load_from_memory(png_data).ok()?.into_rgba8();
+    let (width, height) = img.dimensions();
+    let rgba = img.into_raw();
+    Some(egui::IconData { rgba, width, height })
+}
+
 #[derive(Default)]
 pub struct ServerFields {
     pub root: PathBuf,
@@ -107,7 +127,7 @@ pub struct App {
     pub server_stop: Option<Arc<std::sync::atomic::AtomicBool>>,
     pub server_status_rx: Option<Receiver<String>>,
     pub server_transfer_rx: Option<Receiver<ServerTransferEvent>>,
-    pub server_progress_rx: Option<Receiver<u64>>,
+    pub server_progress_rx: Option<Receiver<(u64, Option<u64>)>>,
     pub remote_host: String,
     pub remote_port: u16,
     pub blksize: u16,
@@ -264,7 +284,7 @@ impl App {
         let stop_for_self = Arc::clone(&stop);
         let (st_tx, st_rx) = std::sync::mpsc::channel::<String>();
         let (tr_tx, tr_rx) = std::sync::mpsc::channel::<ServerTransferEvent>();
-        let (pr_tx, pr_rx) = std::sync::mpsc::channel::<u64>();
+        let (pr_tx, pr_rx) = std::sync::mpsc::channel::<(u64, Option<u64>)>();
         self.server_transfer_rx = Some(tr_rx);
         self.server_progress_rx = Some(pr_rx);
 
@@ -436,16 +456,17 @@ impl App {
         }
         for line in server_log_lines { self.push_log(line); }
 
-        // 服务端传输进度：每来一个 progress 事件更新匹配 transfer 的 bytes + 计算 KB/s。
+        // 服务端传输进度：每来一个 progress 事件更新匹配 transfer 的 bytes + total。
         if let Some(rx) = self.server_progress_rx.as_ref() {
-            while let Ok(bytes) = rx.try_recv() {
+            while let Ok((bytes, total)) = rx.try_recv() {
                 if let Some(t) = self.transfers.iter_mut().rev().find(|t| {
                     t.target.starts_with("server://") && !t.done
                 }) {
                     let dt = t.started.elapsed().as_secs_f64().max(0.001);
-                    let inst = bytes as f64 / dt;  // bytes per second
+                    let inst = bytes as f64 / dt;
                     t.bps_ema = if t.bps_ema == 0.0 { inst } else { t.bps_ema * 0.7 + inst * 0.3 };
                     t.bytes = bytes;
+                    t.total = total;
                 }
             }
         }
@@ -1260,7 +1281,7 @@ async fn run_server_with_observer(
     bind_addr: std::net::SocketAddr,
     cfg: last_tftp_core::server::ServerConfig,
     tr_tx: std::sync::mpsc::Sender<ServerTransferEvent>,
-    pr_tx: std::sync::mpsc::Sender<u64>,
+    pr_tx: std::sync::mpsc::Sender<(u64, Option<u64>)>,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> std::io::Result<()> {
     use last_tftp_core::packet::Packet;

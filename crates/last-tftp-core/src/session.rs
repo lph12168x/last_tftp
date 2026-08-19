@@ -85,6 +85,7 @@ mod tests {
             blksize: 1468,
             timeout: 3,
             windowsize: 8,
+            tsize: None,
         };
         let out = apply_negotiation(&cfg, neg);
         assert_eq!(out.blksize, 1468);

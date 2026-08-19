@@ -61,7 +61,7 @@ pub async fn handle_one(
     peer: SocketAddr,
     pkt: Packet,
     cfg: ServerConfig,
-    progress_tx: Option<std::sync::mpsc::Sender<u64>>,
+    progress_tx: Option<std::sync::mpsc::Sender<(u64, Option<u64>)>>,
 ) -> Result<TransferStats, TftpError> {
     let bind_addr = if peer.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" };
     let sock = UdpSocket::bind(bind_addr).await.map_err(TftpError::Io)?;
@@ -154,18 +154,9 @@ async fn serve_read(
     peer: SocketAddr,
     path: &Path,
     req_opts: Options,
-    progress_tx: Option<std::sync::mpsc::Sender<u64>>,
+    progress_tx: Option<std::sync::mpsc::Sender<(u64, Option<u64>)>>,
 ) -> Result<TransferStats, TftpError> {
     let neg = clamp_negotiation(Negotiation::defaults().apply_oack(&req_opts));
-
-    let mut oack_opts = Options::new();
-    oack_opts.set_blksize(neg.blksize);
-    oack_opts.set_timeout(neg.timeout);
-    if neg.windowsize > 1 {
-        oack_opts.set_windowsize(neg.windowsize);
-    }
-    let oack = Packet::Oack { options: oack_opts };
-    send_packet(&sock, &oack, peer).await.map_err(TftpError::Io)?;
 
     let mut f = match File::open(path).await {
         Ok(f) => f,
@@ -187,9 +178,20 @@ async fn serve_read(
             return Ok(TransferStats::default());
         }
     };
+    let file_len = f.metadata().await.map_err(TftpError::Io)?.len();
+
+    let mut oack_opts = Options::new();
+    oack_opts.set_blksize(neg.blksize);
+    oack_opts.set_timeout(neg.timeout);
+    if neg.windowsize > 1 {
+        oack_opts.set_windowsize(neg.windowsize);
+    }
+    oack_opts.set_tsize(file_len);  // 让 client 知道总大小，GUI 显示真实百分比
+    let oack = Packet::Oack { options: oack_opts };
+    send_packet(&sock, &oack, peer).await.map_err(TftpError::Io)?;
+
     let mut block: u16 = 1;
     let mut buf = vec![0u8; neg.blksize as usize];
-    let file_len = f.metadata().await.map_err(TftpError::Io)?.len();
     let mut bytes_sent: u64 = 0;
     if file_len == 0 {
         let data = Packet::Data {
@@ -239,7 +241,7 @@ async fn serve_read(
         bytes_sent += n as u64;
         debug!(%peer, block, n, "send DATA");
         if let Some(tx) = &progress_tx {
-            let _ = tx.send(bytes_sent);
+            let _ = tx.send((bytes_sent, Some(file_len)));
         }
         let is_last_short = (n as u16) < neg.blksize;
 
@@ -296,7 +298,7 @@ async fn serve_write(
     peer: SocketAddr,
     path: &Path,
     req_opts: Options,
-    progress_tx: Option<std::sync::mpsc::Sender<u64>>,
+    progress_tx: Option<std::sync::mpsc::Sender<(u64, Option<u64>)>>,
 ) -> Result<TransferStats, TftpError> {
     let neg = clamp_negotiation(Negotiation::defaults().apply_oack(&req_opts));
 
@@ -362,7 +364,7 @@ async fn serve_write(
                     .await
                     .map_err(TftpError::Io)?;
                 if let Some(tx) = &progress_tx {
-                    let _ = tx.send(received);
+                    let _ = tx.send((received, None));
                 }
                 if last {
                     break;
