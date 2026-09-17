@@ -9,18 +9,24 @@
       <stop offset="100%" style="stop-color:#0088aa"/>
     </linearGradient>
   </defs>
-  
+
   <rect width="512" height="512" rx="96" fill="url(#bg)"/>
-  
-  <!-- Two rounded rectangles (server left, client right) -->
-  <rect x="120" y="176" width="120" height="160" rx="16" fill="#0f3460"/>
-  <rect x="272" y="176" width="120" height="160" rx="16" fill="#0f3460"/>
-  
-  <!-- Transfer arrow (center) -->
-  <path d="M248 256 L264 256" stroke="url(#accent)" stroke-width="12" stroke-linecap="round"/>
-  <path d="M256 248 L272 256 L256 264" stroke="url(#accent)" stroke-width="12" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
-  
-  <!-- Small status dots on each box -->
-  <circle cx="180" cy="216" r="6" fill="#00d4ff"/>
-  <circle cx="332" cy="216" r="6" fill="#00d4ff"/>
+
+  <!-- Letter mark "L", traced from resources/letter-l.png -->
+  <!-- (glyph bbox x160-351, y132-379; stem 60px, foot 80px) -->
+  <path d="M 160 132
+           H 276
+           V 166
+           L 246 172
+           V 333
+           H 306
+           V 300
+           H 351
+           V 379
+           H 160
+           V 345
+           L 186 339
+           V 172
+           L 160 166
+           Z" fill="url(#accent)"/>
 </svg>
